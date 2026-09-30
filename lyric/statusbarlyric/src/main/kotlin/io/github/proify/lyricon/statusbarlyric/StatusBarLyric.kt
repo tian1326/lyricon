@@ -494,6 +494,28 @@ class StatusBarLyric(
     }
 
     /**
+     * 导出当前可见性与内容状态，供「导出日志」采集诊断信息。
+     *
+     * 与 [logVisibilityState] 用的是同一批判定条件，只是对外以字符串形式返回。
+     */
+    fun dumpState(): String = buildString {
+        append("visible=$isVisible")
+        append(", playing=$isPlaying")
+        append(", userHidden=$userHidden")
+        append(", timedOut=$lyricTimedOut")
+        append(", hasContent=$hasLyricContent")
+        append(", disabled=$isDisabledVisible")
+        append(", lockScreenHide=${isHideOnLockScreen()}")
+        append(", sleep=$isSleepMode")
+        append(", textShouldShow=${textView.shouldShow()}")
+        append(", alpha=$alpha")
+        append(", size=${width}x${height}")
+        append(", translationX=$translationX")
+        append(", lyric='${currentLyric?.take(40)}'")
+        append(", attached=$isAttachedToWindow")
+    }
+
+    /**
      * 应用 / 取消歌词的隐藏(把手)状态
      *
      * @param hidden true 时折叠为透明把手(净占位 0,仍覆盖原歌词区域接收点击)

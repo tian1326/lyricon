@@ -42,6 +42,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * SystemUI Hook 入口对象
@@ -231,6 +232,51 @@ object SystemUIHooker : PackageHooker() {
 
             onCommand(AppBridgeConstants.REQUEST_CLEAR_TRANSLATION_DB) {
                 AiTranslator.clearCache { LyricDataHub.reprocessCurrentSong() }
+            }
+
+            onQuery(AppBridgeConstants.REQUEST_EXPORT_LOG) {
+                YLog.info(TAG, "App requested log export")
+
+                val header = runCatching { buildDiagnostics() }
+                    .getOrElse { "诊断信息采集失败: ${it.message}" }
+
+                val data = YLog.dumpBuffer(header)
+                    .toByteArray(Charsets.UTF_8)
+                    .deflate()
+
+                reply(Bundle().apply {
+                    putByteArray("result", data)
+                })
+            }
+        }
+    }
+
+    /**
+     * 采集运行时诊断信息，作为导出日志的头部。
+     *
+     * 重点呈现"歌词不显示但状态栏组件正常"这类问题的判定依据：
+     * 每个控制器的可见性、手动隐藏状态、播放状态与系统禁用状态。
+     */
+    private suspend fun buildDiagnostics(): String = withContext(Dispatchers.Main) {
+        buildString {
+            appendLine("===== 运行时诊断 =====")
+            appendLine("moduleActive: ${!isSafeMode}")
+            appendLine("playing: ${LyricViewController.isPlaying}")
+            appendLine("hiddenByUser: ${LyricViewController.isLyricHiddenByUser}")
+            appendLine("statusBarContentDisabled: ${LyricViewController.isStatusBarContentDisabled}")
+            appendLine("activePackage: ${LyricViewController.activePackage}")
+            appendLine("gestureEnabled: ${LyricPrefs.gestureEnabled}")
+            appendLine("position: ${LyricViewController.currentLogicPosition}ms")
+
+            val controllers = StatusBarViewManager.controllers
+            appendLine("controllers: ${controllers.size}")
+            controllers.forEachIndexed { index, controller ->
+                appendLine(
+                    "  #$index root=${controller.statusBarView.javaClass.simpleName} " +
+                            "attached=${controller.statusBarView.isAttachedToWindow} " +
+                            "applyRules=${controller.computeShouldApplyPlayingRules()}"
+                )
+                appendLine("     ${controller.lyricView.dumpState()}")
             }
         }
     }

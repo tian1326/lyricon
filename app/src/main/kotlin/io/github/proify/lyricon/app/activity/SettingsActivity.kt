@@ -9,6 +9,9 @@ package io.github.proify.lyricon.app.activity
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,9 +27,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.proify.android.extensions.defaultSharedPreferences
+import io.github.proify.android.extensions.inflate
 import io.github.proify.lyricon.app.AppBackup
+import io.github.proify.lyricon.app.BuildConfig
 import io.github.proify.lyricon.app.LyriconApp
 import io.github.proify.lyricon.app.R
+import io.github.proify.lyricon.app.bridge.AppBridgeConstants
+import io.github.proify.lyricon.app.bridge.LyriconBridge
+import io.github.proify.lyricon.common.PackageNames
 import io.github.proify.lyricon.app.compose.AppToolBarListContainer
 import io.github.proify.lyricon.app.compose.IconActions
 import io.github.proify.lyricon.app.compose.preference.rememberBooleanPreference
@@ -75,6 +83,73 @@ class SettingsActivity : BaseActivity() {
             }
         }
 
+    /** 待写入的日志正文（取到日志后再让用户选择保存位置） */
+    @Volatile
+    private var pendingLog: String? = null
+
+    private val logExportLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.CreateDocument("text/plain")
+        ) { uri ->
+            uri ?: return@registerForActivityResult
+            val content = pendingLog ?: return@registerForActivityResult
+            pendingLog = null
+
+            settingsScope.launch {
+                runCatching {
+                    contentResolver.openOutputStream(uri)?.use {
+                        it.write(content.toByteArray(Charsets.UTF_8))
+                    }
+                }
+            }
+        }
+
+    /**
+     * 导出日志：向 SystemUI 进程索取其内存日志缓冲，再让用户选择保存位置。
+     *
+     * 模块未激活或跨进程调用失败时，仍然导出一份 App 侧信息 + 排查提示，
+     * 避免点了没反应。
+     */
+    private fun exportLog() {
+        settingsScope.launch {
+            val systemUiLog = runCatching {
+                val response = LyriconBridge.with(this@SettingsActivity)
+                    .to(PackageNames.SYSTEM_UI)
+                    .key(AppBridgeConstants.REQUEST_EXPORT_LOG)
+                    .await(5000)
+
+                response.getByteArray("result")?.inflate()?.toString(Charsets.UTF_8)
+            }.getOrNull()
+
+            val content = systemUiLog ?: buildUnavailableLog()
+
+            pendingLog = content
+            withContext(Dispatchers.Main) {
+                logExportLauncher.launch("lyricon_log_${logFileTimestamp()}.txt")
+            }
+        }
+    }
+
+    /** 模块无法提供日志时的兜底内容，至少告诉用户下一步该看什么 */
+    private fun buildUnavailableLog(): String = buildString {
+        appendLine("===== Lyricon 日志导出 =====")
+        appendLine("无法从 SystemUI 进程获取日志。")
+        appendLine()
+        appendLine("可能原因：")
+        appendLine("1. 模块未激活（检查 LSPosed 中是否已启用本模块并勾选 SystemUI）")
+        appendLine("2. SystemUI 尚未重启，模块代码还没加载")
+        appendLine("3. 模块进入了安全模式")
+        appendLine()
+        appendLine("App 版本: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        appendLine("安全模式: ${LyriconApp.isSafeMode}")
+        appendLine("导出时间: ${logFileTimestamp()}")
+        appendLine()
+        appendLine("提示：也可通过 adb 直接抓取日志：adb logcat -s Lyricon")
+    }
+
+    private fun logFileTimestamp(): String =
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
     private fun applySettingsWithNotify(
         task: CoroutineScope.() -> Unit
     ) {
@@ -92,7 +167,8 @@ class SettingsActivity : BaseActivity() {
             SettingsScreen(
                 onSettingsApplied = ::restartSelf,
                 onBackupExport = { backupExportLauncher.launch("lyricon_backup.bin") },
-                onBackupImport = { backupImportLauncher.launch(arrayOf("*/*")) }
+                onBackupImport = { backupImportLauncher.launch(arrayOf("*/*")) },
+                onExportLog = ::exportLog
             )
         }
     }
@@ -110,7 +186,8 @@ class SettingsActivity : BaseActivity() {
     private fun SettingsScreen(
         onSettingsApplied: () -> Unit,
         onBackupExport: () -> Unit,
-        onBackupImport: () -> Unit
+        onBackupImport: () -> Unit,
+        onExportLog: () -> Unit
     ) {
         AppToolBarListContainer(
             title = stringResource(R.string.activity_settings),
@@ -136,7 +213,22 @@ class SettingsActivity : BaseActivity() {
                     BackupSetting(onBackupExport, onBackupImport)
                 }
             }
+            item("diagnostics") {
+                SettingsSectionCard(topPadding = 16.dp) {
+                    DiagnosticsSetting(onExportLog)
+                }
+            }
         }
+    }
+
+    @Composable
+    private fun DiagnosticsSetting(onExportLog: () -> Unit) {
+        ArrowPreference(
+            startAction = { IconActions(painterResource(R.drawable.file_24px)) },
+            title = stringResource(R.string.item_export_log),
+            summary = stringResource(R.string.item_summary_export_log),
+            onClick = onExportLog
+        )
     }
 
     @Composable

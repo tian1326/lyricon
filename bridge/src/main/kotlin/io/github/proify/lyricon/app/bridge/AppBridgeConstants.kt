@@ -12,4 +12,7 @@ object AppBridgeConstants {
     const val REQUEST_HIGHLIGHT_VIEW: String = "request_highlight_view"
     const val REQUEST_CHECK_SAFE_MODE: String = "request_check_safe_mode"
     const val REQUEST_VIEW_TREE: String = "request_view_tree"
+
+    /** 请求 SystemUI 进程导出内存日志缓冲（用于「导出日志」排查问题） */
+    const val REQUEST_EXPORT_LOG: String = "request_export_log"
 }

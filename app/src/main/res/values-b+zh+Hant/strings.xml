@@ -161,6 +161,8 @@
     <string name="item_text_fading_edge_length">邊緣淡出長度</string>
     <string name="item_app_backup">備份</string>
     <string name="item_app_restore">還原</string>
+    <string name="item_export_log">匯出日誌</string>
+    <string name="item_summary_export_log">儲存 SystemUI 執行日誌與診斷資訊，便於排查歌詞不顯示等問題</string>
     <string name="option_timeout_hide_never">不隱藏</string>
     <string name="item_base_timeout_no_lyric">無歌詞隱藏超時</string>
     <string name="item_base_timeout_no_update">無更新隱藏超時</string>

@@ -161,6 +161,8 @@
     <string name="item_text_fading_edge_length">Fading edge length</string>
     <string name="item_app_backup">Backup</string>
     <string name="item_app_restore">Restore</string>
+    <string name="item_export_log">Export log</string>
+    <string name="item_summary_export_log">Save SystemUI runtime log and diagnostics for troubleshooting</string>
     <string name="option_timeout_hide_never">Never hide</string>
     <string name="item_base_timeout_no_lyric">No-lyrics hide timeout</string>
     <string name="item_base_timeout_no_update">No-update hide timeout</string>
