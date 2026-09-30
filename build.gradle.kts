@@ -91,7 +91,9 @@ subprojects {
                             fileName.contains("arm64-v8a") -> "-arm64-v8a"
                             fileName.contains("armeabi-v7a") -> "-armeabi-v7a"
                             fileName.contains("x86_64") -> "-x86_64"
-                            else -> ""
+                            fileName.contains("x86") -> "-x86"
+                            // 关闭分包时的单包（通用包）
+                            else -> "-universal"
                         }
                         "${moduleName}-${versionName}-${buildType}${abiSuffix}.apk"
                     }

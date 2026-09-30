@@ -23,6 +23,9 @@
 .cxx
 local.properties
 /release.jks
+/signing.properties
+*.jks
+*.keystore
 
 node_modules/
 docs/.vitepress/cache/

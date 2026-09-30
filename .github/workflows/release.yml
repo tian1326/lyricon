@@ -1,21 +1,23 @@
-name: Android CI
+name: Release
 
 on:
   push:
-    branches: [master]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-  pull_request:
-    branches: [master]
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（必须已存在）'
+        required: true
+        default: 'v1.0.40.rc'
+      prerelease:
+        description: '标记为预发布'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  contents: write
 
 jobs:
   build:
@@ -24,13 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - build_type: release
-            abi: split
-          - build_type: release
-            abi: universal
-          - build_type: debug
-            abi: universal
+        build_type: [debug, release]
+        abi: [split, universal]
 
     steps:
       - name: 检出代码
@@ -46,7 +43,6 @@ jobs:
         run: |
           if [ -f "gradle/gradle-daemon-jvm.properties" ]; then
             rm -f gradle/gradle-daemon-jvm.properties
-            echo "已删除 Gradle 守护进程 JDK 配置（避免 CI 再去下载 JetBrains JDK）"
           fi
 
       - name: 授予 Gradle 执行权限
@@ -56,7 +52,6 @@ jobs:
         run: |
           sed -i 's/-Xmx[0-9]\+g/-Xmx4g/g' gradle.properties
           sed -i 's/-XX:MaxMetaspaceSize=[0-9]\+g/-XX:MaxMetaspaceSize=1g/g' gradle.properties
-          grep 'org.gradle.jvmargs' gradle.properties
 
       - name: 缓存 Gradle 依赖
         uses: actions/cache@v4
@@ -71,7 +66,6 @@ jobs:
       - name: 解码签名密钥
         run: |
           echo "${{ secrets.SIGNING_KEY }}" | base64 -d > "$GITHUB_WORKSPACE/release.jks"
-          echo "密钥已解码到 release.jks"
 
       - name: 组装 ABI 参数
         id: abi
@@ -104,21 +98,27 @@ jobs:
         if: always()
         run: rm -f "$GITHUB_WORKSPACE/release.jks"
 
-  summary:
+  release:
     runs-on: ubuntu-latest
     needs: build
-    if: always()
 
     steps:
-      - name: 构建结果摘要
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 列出待发布文件
         run: |
-          {
-            echo "## 构建完成 ✅"
-            echo ""
-            echo "- **分支**: ${{ github.ref_name }}"
-            echo "- **提交**: ${{ github.sha }}"
-            echo "- **触发方式**: ${{ github.event_name }}"
-            echo "- **构建编号**: ${{ github.run_number }}"
-            echo ""
-            echo "APK 已上传到 Artifacts，可在 Actions 页面下载。"
-          } >> "$GITHUB_STEP_SUMMARY"
+          find artifacts -name '*.apk' | sort
+          echo "共 $(find artifacts -name '*.apk' | wc -l) 个 APK"
+
+      - name: 创建 Release 并上传 APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: Lyricon ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: artifacts/**/*.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || contains(github.ref_name, 'rc') }}
