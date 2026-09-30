@@ -284,6 +284,8 @@
     <string name="option_gesture_previous">Previous track</string>
     <string name="option_gesture_next">Next track</string>
     <string name="option_gesture_open_control">Open control panel</string>
+    <string name="option_gesture_toggle_lyric_visibility">Hide / show lyrics</string>
+    <string name="option_gesture_toggle_lyric_visibility_summary">Hides the lyrics and restores the status bar items they cover; tap the lyrics area again to bring them back.</string>
     <string name="item_gesture_haptic">Vibration feedback</string>
     <string name="item_gesture_haptic_summary">Vibrate when a gesture is recognized; turn off to disable.</string>
     <string name="item_ai_config_description">Note</string>

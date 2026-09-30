@@ -44,6 +44,26 @@ object LyricViewController : ActivePlayerListener,
     var activePackage: String = ""
         private set
 
+    /**
+     * 用户是否手动隐藏了歌词（点击歌词区域触发）
+     *
+     * 隐藏时歌词从状态栏移出，被可见性规则隐藏的状态栏组件会恢复显示。
+     * 该状态对所有控制器生效，仅在停止播放或切换播放器时自动重置。
+     */
+    @Volatile
+    var isLyricHiddenByUser: Boolean = false
+        private set
+
+    /**
+     * 系统是否正在隐藏状态栏系统信息区(时钟、通知图标等)
+     *
+     * 状态栏被重新注入时,新控制器不会收到上一次的 disable 事件,
+     * 这里缓存一份全局值供新控制器对齐,避免状态漂移。
+     */
+    @Volatile
+    var isStatusBarContentDisabled: Boolean = false
+        private set
+
     /** 是否显示翻译内容 */
     @Volatile
     private var isDisplayTranslation: Boolean = true
@@ -61,6 +81,10 @@ object LyricViewController : ActivePlayerListener,
     @Volatile
     var currentSong: Song? = null
         private set
+
+    /** 当前纯文本歌词(无 Lrc 匹配时),同样需要供新控制器对齐状态 */
+    @Volatile
+    private var currentText: String? = null
 
     /** 用于处理 UI 刷新任务的 Handler */
     private val mainHandler by lazy { Handler(MAIN_LOOPER) }
@@ -94,6 +118,8 @@ object LyricViewController : ActivePlayerListener,
         updateAllControllers {
             lyricView.setSong(song)
             refreshTranslationVisibility(lyricView)
+            // 新注入的状态栏视图可能没收到过 setPlaying,借歌曲事件校正一次
+            lyricView.ensurePlayingState(isPlaying)
         }
 
         updateCoverFileFromSong(song)
@@ -120,6 +146,8 @@ object LyricViewController : ActivePlayerListener,
     override fun onActiveProviderChanged(providerInfo: ProviderInfo?) {
         YLog.info(TAG, "onActiveProviderChanged: $providerInfo")
 
+        // 切换播放源属于新一轮播放，重置用户手动隐藏状态
+        setLyricHiddenByUser(false)
         this.activePackage = providerInfo?.playerPackageName.orEmpty()
         LyricPrefs.activePackageName = this.activePackage
 
@@ -133,11 +161,78 @@ object LyricViewController : ActivePlayerListener,
      * @param isPlaying 播放状态
      */
     override fun onPlaybackStateChanged(isPlaying: Boolean) {
-        if (this.isPlaying == isPlaying) return
-        YLog.info(TAG, "onPlaybackStateChanged: $isPlaying")
+        YLog.info(TAG, "onPlaybackStateChanged: $isPlaying (was ${this.isPlaying})")
 
+        // 不做全局去重:状态栏可能被重新注入(新控制器),全局去重会把状态变更吞掉,
+        // 导致新视图永远收不到 setPlaying 而不显示歌词。视图内部仍有去重,不会产生冗余刷新。
         this.isPlaying = isPlaying
+
+        // 停止播放视为一轮播放结束，重置用户手动隐藏状态，避免歌词一直不再显示
+        if (!isPlaying) setLyricHiddenByUser(false)
+
         updateAllControllers { lyricView.setPlaying(isPlaying) }
+    }
+
+    /**
+     * 切换歌词的用户隐藏状态（点击歌词区域触发）
+     *
+     * @param hidden true 表示隐藏歌词并恢复被隐藏的状态栏组件
+     */
+    fun setLyricHiddenByUser(hidden: Boolean) {
+        if (isLyricHiddenByUser == hidden) return
+        YLog.info(TAG, "setLyricHiddenByUser: $hidden")
+
+        isLyricHiddenByUser = hidden
+        updateAllControllers { setLyricUserHidden(hidden) }
+    }
+
+    /** 在隐藏与显示之间切换歌词 */
+    fun toggleLyricHiddenByUser() = setLyricHiddenByUser(!isLyricHiddenByUser)
+
+    /**
+     * 记录系统的状态栏禁用状态并分发给所有控制器
+     *
+     * 该全局值会用于新注入的状态栏视图对齐状态(见 [syncTo])。
+     */
+    fun setStatusBarContentDisabled(disabled: Boolean) {
+        isStatusBarContentDisabled = disabled
+        updateAllControllers { onDisableStateChanged(disabled) }
+    }
+
+    /**
+     * 把当前全局状态整体推送给单个控制器
+     *
+     * 状态栏可能被 SystemUI 重新注入(配置变更、横竖屏、多任务等场景),
+     * 新控制器持有的是全新视图,不会收到此前已经发生过的事件;若不补发,
+     * 就会出现"全局在播放、新歌词视图却一直不显示"的问题。
+     */
+    fun syncTo(controller: StatusBarViewController) {
+        StatusBarViewManager.runOnMainThread {
+            runCatching {
+                controller.onDisableStateChanged(isStatusBarContentDisabled)
+
+                val song = currentSong
+                val text = currentText
+                if (song != null) {
+                    controller.lyricView.setSong(song)
+                } else if (text != null) {
+                    controller.lyricView.setText(text)
+                }
+                refreshTranslationVisibility(controller.lyricView)
+
+                controller.lyricView.setPlaying(isPlaying)
+                controller.lyricView.setPosition(currentLogicPosition)
+                controller.setLyricUserHidden(isLyricHiddenByUser)
+
+                YLog.info(
+                    TAG,
+                    "Synced state to new controller: playing=$isPlaying, " +
+                            "hidden=$isLyricHiddenByUser, disabled=$isStatusBarContentDisabled"
+                )
+            }.onFailure { e ->
+                YLog.error(TAG, "Failed to sync state to controller", e)
+            }
+        }
     }
 
     /**
@@ -165,7 +260,11 @@ object LyricViewController : ActivePlayerListener,
      */
     override fun onReceiveText(text: String?) {
         YLog.info(TAG, "onReceiveText: $text")
-        updateAllControllers { lyricView.setText(text) }
+        this.currentText = text
+        updateAllControllers {
+            lyricView.setText(text)
+            lyricView.ensurePlayingState(isPlaying)
+        }
     }
 
     /**

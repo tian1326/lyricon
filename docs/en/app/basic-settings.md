@@ -71,13 +71,27 @@ playback.
 
 | Gesture    | Default action    | Available actions                                                    |
 |:-----------|:------------------|:---------------------------------------------------------------------|
-| Swipe left | Next track        | No action / Play-Pause / Previous track / Next track / Open control panel |
+| Swipe left | Next track        | No action / Play-Pause / Previous track / Next track / Open control panel / Hide-show lyrics |
 | Swipe right| Previous track    | Same as above                                                        |
 | Tap        | Open control panel| Same as above                                                        |
 | Long press | Play / Pause      | Same as above                                                        |
 
 Slow horizontal dragging is recognized as a swipe, no flick velocity is required. With gestures
 disabled, tapping the lyrics still opens the control panel.
+
+### Hide / Show lyrics
+
+Assign **Hide / Show lyrics** to any gesture to hide the status bar lyrics and bring back the status
+bar items the lyrics were covering (clock, notification icons, etc., depending on your visibility
+rules). Tap the area the lyrics previously occupied to show them again.
+
+The state only lasts for the current playback session: stopping playback or switching player resets
+it back to visible.
+
+> [!TIP]
+> Once hidden, the restored system item occupies the former lyrics slot. If that item is itself
+> clickable (the clock, for example), it handles the tap first — tap empty space in the lyrics area
+> instead to bring the lyrics back.
 
 Gestures come with touch feedback: a subtle shrink while pressed, the lyric content follows your
 finger when swiping and springs back, long press slightly enlarges it, and tap / long press / swipe

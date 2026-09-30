@@ -406,7 +406,8 @@ class BasicLyricStyleActivity : AbstractLyricActivity() {
             LyricGesturePrefs.ACTION_TOGGLE_PLAY,
             LyricGesturePrefs.ACTION_PREVIOUS,
             LyricGesturePrefs.ACTION_NEXT,
-            LyricGesturePrefs.ACTION_OPEN_CONTROL
+            LyricGesturePrefs.ACTION_OPEN_CONTROL,
+            LyricGesturePrefs.ACTION_TOGGLE_LYRIC_VISIBILITY
         )
 
         val optionItems = listOf(
@@ -415,6 +416,7 @@ class BasicLyricStyleActivity : AbstractLyricActivity() {
             DropdownItem(title = stringResource(R.string.option_gesture_previous)),
             DropdownItem(title = stringResource(R.string.option_gesture_next)),
             DropdownItem(title = stringResource(R.string.option_gesture_open_control)),
+            DropdownItem(title = stringResource(R.string.option_gesture_toggle_lyric_visibility)),
         )
 
         val current = preferences.getInt(key, default)

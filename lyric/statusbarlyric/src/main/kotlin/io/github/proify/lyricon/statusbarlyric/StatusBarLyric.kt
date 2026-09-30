@@ -68,13 +68,21 @@ class StatusBarLyric(
         /** 松手回弹阻尼(DecelerateInterpolator 系数,越大越快停下) */
         private const val RELEASE_BOUNCE = 1.5f
 
-        /** 横向拖动时内容跟随手指的阻尼系数 */
-        private const val DRAG_FOLLOW_DAMPING = 0.35f
+        /** 是否输出可见性判定明细(排查"歌词不显示"时打开) */
+        private const val DEBUG_VISIBILITY = true
 
         /** 滑动识别的"踢出"位移(dp)与动画时长(ms) */
         private const val SWIPE_KICK_DP = 22
         private const val SWIPE_KICK_MS = 70L
         private const val SWIPE_RETURN_MS = 190L
+
+        /**
+         * 歌词隐藏(把手)状态下抬升的 Z 序
+         *
+         * 把手与状态栏其它组件重叠,抬升 Z 序可保证它优先收到触摸事件,
+         * 避免被后添加的系统组件抢走点击。
+         */
+        private const val HIDDEN_HANDLE_Z = 1000f
     }
 
     /**
@@ -126,6 +134,24 @@ class StatusBarLyric(
     private var gestureDownX: Float = 0f
     private var gestureDownY: Float = 0f
     private var gestureLongPressFired: Boolean = false
+
+    /**
+     * 收到的触摸事件计数(含触摸路由补发的合成事件)
+     *
+     * 触摸路由用它判断本视图是否"本就能收到事件":若一次手势期间计数没有变化,
+     * 说明事件被上层拦截,需要由路由补发合成手势。
+     */
+    var nativeTouchCount: Long = 0L
+        private set
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        nativeTouchCount++
+        return super.dispatchTouchEvent(ev)
+    }
+
+    // 隐藏(把手)状态下的按下坐标
+    private var hiddenDownX: Float = 0f
+    private var hiddenDownY: Float = 0f
 
     private val gestureDetector = GestureDetector(
         context,
@@ -211,6 +237,36 @@ class StatusBarLyric(
 
     // 当前生效的超时 Runnable
     private var lyricTimeoutTask: Runnable? = null
+
+    /**
+     * 用户手动隐藏歌词(点击歌词区域触发)
+     *
+     * 为 true 时歌词折叠为一个"把手":内容全部隐藏、视觉完全透明,
+     * 并通过负的 [rightMargin] 把占位抵消为 0,状态栏空间让给被可见性规则隐藏的
+     * 组件(时钟、通知图标等);把手仍覆盖歌词原有区域,点击即恢复歌词。
+     */
+    var userHidden: Boolean = false
+        set(value) {
+            if (field == value) return
+            Log.d(TAG, "用户隐藏歌词：$value")
+            field = value
+            applyHiddenState(value)
+        }
+
+    /**
+     * 无条件同步隐藏(把手)状态
+     *
+     * 状态栏被重新注入时,新视图的 [userHidden] 与全局记录可能不一致,
+     * 用这个方法强制对齐一次,避免"全局认为已隐藏、视图却在显示"(或反之)
+     * 导致点击切换失效、歌词不再显示。
+     */
+    fun syncHiddenState(hidden: Boolean) {
+        userHidden = hidden
+        applyHiddenState(hidden)
+    }
+
+    /** 歌词处于隐藏(把手)状态时,点击把手的回调(用于恢复歌词) */
+    var onHiddenClick: (() -> Unit)? = null
 
     // 跟随系统隐藏状态栏内容
     var isDisabledVisible = false
@@ -363,17 +419,44 @@ class StatusBarLyric(
         updateVisibility()
     }
 
+    /**
+     * 校正播放状态(不重新装载歌词内容)
+     *
+     * 状态栏被重新注入后,新视图可能没有收到此前的 setPlaying 事件,
+     * 导致"全局在播放、视图却认为未播放"。这里只对齐状态并重新评估超时与可见性,
+     * 避免重复装载歌词造成闪烁。
+     */
+    fun ensurePlayingState(playing: Boolean) {
+        if (lastPlaying == playing) return
+        Log.d(TAG, "ensurePlayingState: $playing")
+
+        lastPlaying = playing
+        isPlaying = playing
+        onPlayingChanged?.invoke(playing)
+
+        refreshLyricTimeoutState()
+    }
+
     fun isHideOnLockScreen() =
         currentStyle.basicStyle.hideOnLockScreen && keyguardManager.isKeyguardLocked
 
     val enableEnterAnim get() = currentStyle.packageStyle.text.enableEnterAnim
     private var lastDisabledVisible: Boolean = false
     fun updateVisibility() {
+        // 隐藏态:不显示歌词内容,只保留可点击的把手(锁屏 / 系统隐藏状态栏时把手也隐藏)
+        if (userHidden) {
+            isVisible = !isHideOnLockScreen() && !isDisabledVisible
+            lastDisabledVisible = isDisabledVisible
+            return
+        }
+
         val shouldShow = isPlaying
                 && !isHideOnLockScreen()
                 && textView.shouldShow()
                 && !lyricTimedOut
                 && !isDisabledVisible
+
+        logVisibilityState(shouldShow)
 
         if (shouldShow == isVisible) {
             return
@@ -391,6 +474,56 @@ class StatusBarLyric(
         }
 
         lastDisabledVisible = isDisabledVisible
+    }
+
+    /**
+     * 输出本次可见性判定的完整明细
+     *
+     * 歌词"不显示"可能来自多个互斥条件(播放状态、超时、系统禁用状态栏、锁屏、
+     * 以及手动隐藏残留的透明状态),这里一次性打全,便于从日志直接定位原因。
+     */
+    private fun logVisibilityState(shouldShow: Boolean) {
+        if (!DEBUG_VISIBILITY) return
+        Log.d(
+            TAG, "visibility: shouldShow=$shouldShow, isVisible=$isVisible | " +
+                    "playing=$isPlaying, userHidden=$userHidden, timedOut=$lyricTimedOut, " +
+                    "disabled=$isDisabledVisible, lockScreenHide=${isHideOnLockScreen()}, " +
+                    "sleep=$isSleepMode, textShouldShow=${textView.shouldShow()}, " +
+                    "alpha=$alpha, w=$width, translationX=$translationX"
+        )
+    }
+
+    /**
+     * 应用 / 取消歌词的隐藏(把手)状态
+     *
+     * @param hidden true 时折叠为透明把手(净占位 0,仍覆盖原歌词区域接收点击)
+     */
+    private fun applyHiddenState(hidden: Boolean) {
+        if (hidden) {
+            val width = calculateContainerWidth(currentStyle.basicStyle)
+            ensureLayoutParams().apply {
+                this.width = width
+                leftMargin = 0
+                topMargin = 0
+                bottomMargin = 0
+                // 负的右外边距抵消自身宽度:净占位为 0,空间全部让给状态栏组件,
+                // 而把手仍覆盖歌词原有区域以接收点击
+                rightMargin = -width
+            }
+            logoView.visibility = GONE
+            textView.visibility = GONE
+            alpha = 0f
+            translationZ = HIDDEN_HANDLE_Z
+        } else {
+            logoView.visibility = VISIBLE
+            textView.visibility = VISIBLE
+            alpha = 1f
+            translationZ = 0f
+            // 还原宽度、外边距与内边距
+            updateLayoutConfig(currentStyle)
+        }
+        requestLayout()
+        updateVisibility()
     }
 
     fun setSong(song: Song?) {
@@ -446,6 +579,26 @@ class StatusBarLyric(
     // --- 手势识别与触摸反馈 ---
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // 隐藏态:把手不参与手势映射,区域内的点击一律用于恢复歌词
+        if (userHidden) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    hiddenDownX = event.x
+                    hiddenDownY = event.y
+                }
+
+                MotionEvent.ACTION_UP -> {
+                    val moved = abs(event.x - hiddenDownX) > touchSlop ||
+                            abs(event.y - hiddenDownY) > touchSlop
+                    if (!moved) {
+                        triggerHaptic(HapticFeedbackConstants.KEYBOARD_TAP)
+                        onHiddenClick?.invoke()
+                    }
+                }
+            }
+            return true
+        }
+
         if (!gestureEnabled) {
             // 手势关闭:交给系统默认触摸行为,由点击监听器处理单击
             return super.onTouchEvent(event)
@@ -459,10 +612,7 @@ class StatusBarLyric(
                 startPressFeedback()
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                // 横向拖动时内容跟随手指(阻尼),滑动感更强
-                translationX = (event.x - gestureDownX) * DRAG_FOLLOW_DAMPING
-            }
+            MotionEvent.ACTION_MOVE -> Unit
 
             MotionEvent.ACTION_UP -> {
                 val dx = event.x - gestureDownX

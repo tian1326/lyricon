@@ -83,6 +83,24 @@ object StatusBarViewManager {
     }
 
     /**
+     * 销毁所有已经脱离窗口的控制器。
+     *
+     * SystemUI 重新注入状态栏时旧控制器不会被回收(没有任何地方调用 [remove]),
+     * 长时间运行会不断堆积,每个都持有歌词视图、全局布局监听与触摸 Hook。
+     * 该方法应在有新控制器加入前调用。
+     *
+     * @return 被销毁的控制器数量
+     */
+    fun pruneDetached(): Int {
+        val stale = _controllers.filter { !it.statusBarView.isAttachedToWindow }
+        stale.forEach { remove(it) }
+        if (stale.isNotEmpty()) {
+            Log.d(TAG, "Pruned ${stale.size} detached controller(s)")
+        }
+        return stale.size
+    }
+
+    /**
      * 确保在主线程安全地遍历所有控制器。
      * 适用于 UI 状态更新、显示/隐藏等低频操作。
      *

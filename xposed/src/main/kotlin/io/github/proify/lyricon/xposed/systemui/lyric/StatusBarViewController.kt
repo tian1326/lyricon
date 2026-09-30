@@ -54,6 +54,13 @@ class StatusBarViewController(
     val visibilityController: ViewVisibilityController = ViewVisibilityController(statusBarView)
     val lyricView: StatusBarLyric by lazy { createLyricView(currentLyricStyle) }
 
+    /**
+     * 触摸路由:在状态栏根视图层面接管歌词区域的触摸并转发给歌词视图。
+     *
+     * 部分 ROM 的状态栏存在更高层级的视图拦截或遮挡触摸,歌词视图自身收不到事件。
+     */
+    private val touchRouter: LyricTouchRouter = LyricTouchRouter(statusBarView) { lyricView }
+
     // --- 手势控制状态 (随偏好热更新) ---
     private var gestureEnabled: Boolean = LyricGesturePrefs.DEFAULT_ENABLED
     private var swipeLeftAction: Int = LyricGesturePrefs.DEFAULT_SWIPE_LEFT
@@ -98,11 +105,16 @@ class StatusBarViewController(
         // 手势控制:读取偏好并绑定回调,手势动作可配置
         refreshGestureConfig()
         lyricView.gestureListener = { gesture -> onLyricGesture(gesture) }
+        // 歌词被手动隐藏后,点击把手恢复显示
+        lyricView.onHiddenClick = { LyricViewController.setLyricHiddenByUser(false) }
 
         StatusBarColorMonitor.bindStatusBar(statusBarView)
         colorMonitorView = getClockView()
         StatusBarColorMonitor.bindClockView(colorMonitorView)
         StatusBarColorMonitor.addListener(colorChangeListener)
+
+        // 接管歌词区域的触摸(绕过 ROM 上层视图的拦截/遮挡)
+        touchRouter.attach()
 
         statusBarView.doOnAttach { checkLyricViewExists() }
         YLog.info(tag = TAG, "Lyric view created for $statusBarView")
@@ -115,7 +127,9 @@ class StatusBarViewController(
         ScreenStateMonitor.removeListener(this)
         lyricView.onPlayingChanged = null
         lyricView.gestureListener = null
+        lyricView.onHiddenClick = null
         lyricView.setOnClickListener(null)
+        touchRouter.detach()
         LyricControlPopup.dismissIfOwnedBy(lyricView)
         StatusBarColorMonitor.removeListener(colorChangeListener)
         colorMonitorView?.let { StatusBarColorMonitor.unbindClockView(it) }
@@ -274,6 +288,8 @@ class StatusBarViewController(
     private var wasPlayingBeforeVisibilityUpdate: Boolean = false
 
     fun computeShouldApplyPlayingRules(): Boolean {
+        // 歌词被手动隐藏时把手仍可见,但规则应按"未在显示歌词"处理,放行状态栏组件
+        if (lyricView.userHidden) return false
         return isPlaying && when {
             lyricView.isDisabledVisible -> !lyricView.isHideOnLockScreen()
             lyricView.isVisible -> true
@@ -304,6 +320,25 @@ class StatusBarViewController(
 
     private fun createLyricView(style: LyricStyle) =
         StatusBarLyric(context, style, getClockView() as? TextView)
+
+    // --- 歌词手动隐藏 / 恢复 ---
+
+    /**
+     * 切换歌词的用户隐藏状态。
+     *
+     * 隐藏时歌词折叠为透明把手(不占状态栏空间),被可见性规则隐藏的组件(时钟、通知图标等)
+     * 随之恢复显示;把手覆盖歌词原有区域,点击它即恢复歌词。
+     *
+     * @param hidden true 表示隐藏歌词并放行状态栏组件
+     */
+    fun setLyricUserHidden(hidden: Boolean) {
+        // 用无条件同步:全局状态与视图状态可能因状态栏重新注入而不一致,
+        // 若此时只做"值相同就跳过"的赋值,残留的透明把手会让歌词再也不显示
+        lyricView.syncHiddenState(hidden)
+        applyVisibilityRulesNow()
+
+        YLog.info(TAG, "Lyric hidden by user: $hidden")
+    }
 
     // --- 手势控制 ---
 
@@ -336,12 +371,32 @@ class StatusBarViewController(
         if (gestureEnabled) {
             lyricView.setOnClickListener(null)
         } else {
+            // 关闭手势时也沿用"单击"配置的动作,默认仍是打开控制面板
             lyricView.setOnClickListener { v ->
-                LyricControlPopup.show(v)
+                if (tapAction == LyricGesturePrefs.ACTION_NONE) {
+                    LyricControlPopup.show(v)
+                } else {
+                    performGestureAction(tapAction)
+                }
             }
         }
         // setOnClickListener(null) 会关闭 clickable,这里恢复以保持手势模式下的点击语义(无障碍)
         lyricView.isClickable = true
+    }
+
+    /** 执行手势映射后的具体动作 */
+    private fun performGestureAction(action: Int) {
+        when (action) {
+            LyricGesturePrefs.ACTION_NONE -> Unit
+            LyricGesturePrefs.ACTION_TOGGLE_PLAY -> PlaybackControl.togglePlay()
+            LyricGesturePrefs.ACTION_PREVIOUS -> PlaybackControl.previous()
+            LyricGesturePrefs.ACTION_NEXT -> PlaybackControl.next()
+            LyricGesturePrefs.ACTION_OPEN_CONTROL -> LyricControlPopup.show(lyricView)
+            LyricGesturePrefs.ACTION_TOGGLE_LYRIC_VISIBILITY ->
+                LyricViewController.toggleLyricHiddenByUser()
+
+            else -> YLog.warning(TAG, "Unknown gesture action: $action")
+        }
     }
 
     /**
@@ -357,14 +412,7 @@ class StatusBarViewController(
             StatusBarLyric.GestureType.LONG_PRESS -> longPressAction
         }
 
-        when (action) {
-            LyricGesturePrefs.ACTION_NONE -> Unit
-            LyricGesturePrefs.ACTION_TOGGLE_PLAY -> PlaybackControl.togglePlay()
-            LyricGesturePrefs.ACTION_PREVIOUS -> PlaybackControl.previous()
-            LyricGesturePrefs.ACTION_NEXT -> PlaybackControl.next()
-            LyricGesturePrefs.ACTION_OPEN_CONTROL -> LyricControlPopup.show(lyricView)
-            else -> YLog.warning(TAG, "Unknown gesture action: $action")
-        }
+        performGestureAction(action)
     }
 
     fun highlightView(idName: String?) {

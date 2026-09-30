@@ -31,6 +31,7 @@ import io.github.proify.lyricon.xposed.systemui.hook.StatusBarViewResolver
 import io.github.proify.lyricon.xposed.systemui.hook.ViewVisibilityTracker
 import io.github.proify.lyricon.xposed.systemui.lyric.LyricDataHub
 import io.github.proify.lyricon.xposed.systemui.lyric.LyricPrefs
+import io.github.proify.lyricon.xposed.systemui.lyric.LyricViewController
 import io.github.proify.lyricon.xposed.systemui.lyric.StatusBarViewController
 import io.github.proify.lyricon.xposed.systemui.lyric.StatusBarViewManager
 import io.github.proify.lyricon.xposed.systemui.util.CrashDetector
@@ -148,7 +149,7 @@ object SystemUIHooker : PackageHooker() {
             override fun onDisableStateChanged(shouldHide: Boolean, animate: Boolean) {
                 if (lastDisableStateChanged == shouldHide) return
                 lastDisableStateChanged = shouldHide
-                StatusBarViewManager.forEach { it.onDisableStateChanged(shouldHide) }
+                LyricViewController.setStatusBarContentDisabled(shouldHide)
             }
         })
 
@@ -241,7 +242,16 @@ object SystemUIHooker : PackageHooker() {
         view.doOnAttach {
             val target = view.rootView as? ViewGroup ?: return@doOnAttach
             val controller = StatusBarViewController(target, LyricPrefs.getLyricStyle())
+
+            // 状态栏可能被多次重新注入,旧控制器不会被回收,会逐渐堆积:
+            // 每个都持有歌词视图、布局监听与触摸 Hook,既拖慢状态栏,也容易带来状态错乱。
+            // 这里先把已经脱离窗口的旧控制器销毁掉。
+            StatusBarViewManager.pruneDetached()
+
             StatusBarViewManager.add(controller)
+
+            // 新控制器是全新视图,补发一次当前全局状态,避免"在播放但不显示歌词"
+            LyricViewController.syncTo(controller)
 
             val isFirst = StatusBarViewManager.controllers.size == 1
             if (isFirst) {

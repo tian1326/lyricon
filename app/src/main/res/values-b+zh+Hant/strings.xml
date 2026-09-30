@@ -281,6 +281,8 @@
     <string name="option_gesture_previous">上一曲</string>
     <string name="option_gesture_next">下一曲</string>
     <string name="option_gesture_open_control">開啟控制面板</string>
+    <string name="option_gesture_toggle_lyric_visibility">隱藏/顯示歌詞</string>
+    <string name="option_gesture_toggle_lyric_visibility_summary">隱藏歌詞並恢復被歌詞遮住的狀態列元件，再次點按歌詞區域即可恢復。</string>
     <string name="item_gesture_haptic">震動回饋</string>
     <string name="item_gesture_haptic_summary">手勢識別成功時震動，可關閉。</string>
     <string name="item_base_width_in_landscape">寬度（橫向模式下）</string>

@@ -78,6 +78,14 @@ object AppBridge {
         /** 打开控制面板 */
         const val ACTION_OPEN_CONTROL: Int = 4
 
+        /**
+         * 隐藏 / 显示歌词
+         *
+         * 隐藏时歌词视图会从状态栏移除占位,被歌词挤掉的状态栏组件(时钟、通知图标等)
+         * 会恢复显示;再次触发(点击原歌词区域)则恢复歌词显示。
+         */
+        const val ACTION_TOGGLE_LYRIC_VISIBILITY: Int = 5
+
         /* ---------- 默认值 ---------- */
 
         const val DEFAULT_ENABLED: Boolean = true
