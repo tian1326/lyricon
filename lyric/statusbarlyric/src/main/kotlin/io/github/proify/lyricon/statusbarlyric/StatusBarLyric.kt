@@ -397,6 +397,16 @@ class StatusBarLyric(
     private var lastText: String? = null
     private var lyricType = NONE
 
+    /**
+     * 最近一次已知的播放进度
+     *
+     * 暂停时歌词行会被 [SuperText.reset] 清空，视图里不再有任何可显示的行；
+     * 恢复播放时只重建歌词数据并不会重新定位，必须靠这里记录的进度再做一次 seek，
+     * 否则歌词会一直停在"无行可显示"的状态，直到下一次进度推送才恢复
+     * （长时间暂停后上游可能已停止推送进度，那就再也不显示了）。
+     */
+    private var lastPosition: Long = 0
+
     fun setPlaying(playing: Boolean) {
         if (lastPlaying == playing) return
         Log.d(TAG, "setPlaying: $playing")
@@ -413,7 +423,16 @@ class StatusBarLyric(
                 SONG -> setSong(lastSong)
                 TEXT -> setText(lastText)
             }
+            // 暂停期间歌词行已被清空，这里按暂停前的进度重新定位，
+            // 让歌词在恢复播放的那一刻就回来，而不是等下一次进度推送。
+            if (lastPosition > 0) seekTo(lastPosition)
         }
+
+        Log.d(
+            TAG,
+            "setPlaying: $playing (type=$lyricType, hasSong=${lastSong != null}, " +
+                    "hasText=${lastText != null}, lastPosition=$lastPosition)"
+        )
 
         refreshLyricTimeoutState()
         updateVisibility()
@@ -435,6 +454,19 @@ class StatusBarLyric(
         onPlayingChanged?.invoke(playing)
 
         refreshLyricTimeoutState()
+    }
+
+    /**
+     * 兜底：确保歌词已经按给定进度渲染出来
+     *
+     * 控制层持有全局的播放进度，而视图可能因为状态栏被重新注入等原因丢失过
+     * [lastPosition]。若歌词行已经渲染出来就直接跳过，避免无谓的重复定位。
+     */
+    fun ensureLyricsRendered(position: Long) {
+        if (position <= 0) return
+        if (textView.shouldShow()) return
+        Log.d(TAG, "ensureLyricsRendered: seek to $position")
+        seekTo(position)
     }
 
     fun isHideOnLockScreen() =
@@ -508,6 +540,8 @@ class StatusBarLyric(
         append(", lockScreenHide=${isHideOnLockScreen()}")
         append(", sleep=$isSleepMode")
         append(", textShouldShow=${textView.shouldShow()}")
+        append(", type=$lyricType")
+        append(", lastPosition=$lastPosition")
         append(", alpha=$alpha")
         append(", size=${width}x${height}")
         append(", translationX=$translationX")
@@ -566,6 +600,7 @@ class StatusBarLyric(
     }
 
     fun seekTo(position: Long) {
+        lastPosition = position
         if (isSleepMode) {
             pendingSleepData?.position = position
             return
@@ -576,6 +611,7 @@ class StatusBarLyric(
     }
 
     fun setPosition(position: Long) {
+        lastPosition = position
         if (isSleepMode) {
             pendingSleepData?.position = position
             return

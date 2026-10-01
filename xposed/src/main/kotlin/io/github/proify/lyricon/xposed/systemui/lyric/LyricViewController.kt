@@ -7,6 +7,7 @@
 package io.github.proify.lyricon.xposed.systemui.lyric
 
 import android.os.Handler
+import android.os.SystemClock
 import io.github.proify.android.extensions.crc32
 import io.github.proify.lyricon.lyric.model.Song
 import io.github.proify.lyricon.lyric.style.LyricStyle
@@ -89,6 +90,12 @@ object LyricViewController : ActivePlayerListener,
     /** 用于处理 UI 刷新任务的 Handler */
     private val mainHandler by lazy { Handler(MAIN_LOOPER) }
 
+    /** 进度日志节流时间戳 */
+    private var lastPositionLogAt: Long = 0
+
+    /** 进度日志节流间隔：进度每秒都在推，只按这个间隔打一条 */
+    private const val POSITION_LOG_INTERVAL_MS = 10_000L
+
     /** * 高频进度更新任务。
      * 使用单例 Runnable 减少 GC 压力，仅在进度变更时由主线程调度。
      */
@@ -170,7 +177,14 @@ object LyricViewController : ActivePlayerListener,
         // 停止播放视为一轮播放结束，重置用户手动隐藏状态，避免歌词一直不再显示
         if (!isPlaying) setLyricHiddenByUser(false)
 
-        updateAllControllers { lyricView.setPlaying(isPlaying) }
+        updateAllControllers {
+            lyricView.setPlaying(isPlaying)
+            // 恢复播放时兜底：暂停期间歌词行被清空，只重建数据不会重新定位，
+            // 若进度推送迟到（长时间暂停后上游可能已停止推送），歌词会一直不显示。
+            if (isPlaying) {
+                lyricView.ensureLyricsRendered(currentLogicPosition)
+            }
+        }
     }
 
     /**
@@ -240,7 +254,19 @@ object LyricViewController : ActivePlayerListener,
      * @param position 当前逻辑时间戳
      */
     override fun onPositionChanged(position: Long) {
+        val previous = this.currentLogicPosition
         this.currentLogicPosition = position
+
+        // 进度更新极其频繁，只做节流日志：用于判断「恢复播放后上游是否还在推进度」
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPositionLogAt >= POSITION_LOG_INTERVAL_MS) {
+            lastPositionLogAt = now
+            YLog.debug(
+                TAG,
+                "onPositionChanged: $position (was $previous, playing=$isPlaying)"
+            )
+        }
+
         // 进度更新极其频繁，直接 post 到 Handler
         mainHandler.post(frameUpdater)
     }
