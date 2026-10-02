@@ -68,7 +68,69 @@ class LyricTouchRouter(
 
         /** 保护上面两个集合 */
         private val hookLock = Any()
+
+        /** 通道自检间隔：监听通道可能被 SystemUI 重新设置而丢失，需要定期补挂 */
+        private const val HEALTH_CHECK_INTERVAL_MS = 5_000L
+
+        /**
+         * 判定"上一次手势已经卡死"的间隔
+         *
+         * 通知栏展开等场景会接管触摸流，根视图收不到 UP/CANCEL，
+         * [LyricTouchRouter.delivering] 会一直保持 true，导致后续手势错位。
+         */
+        private const val STALE_GESTURE_MS = 3_000L
+
+        /** 播放恢复 / 亮屏时重新确认所有路由的通道是否还在（应对长时间暂停后触摸失效） */
+        fun refreshAllChannels(reason: String) {
+            val routers = synchronized(hookLock) { activeRouters.toList() }
+            if (routers.isEmpty()) {
+                YLog.info(TAG, "refreshAllChannels($reason): no active router")
+                return
+            }
+            routers.forEach { runCatching { it.ensureChannelAlive(reason) } }
+        }
+
+        /** 汇总所有路由的状态，供「导出日志」诊断 */
+        fun dumpDiagnostics(): String = buildString {
+            val routers = synchronized(hookLock) { activeRouters.toList() }
+            appendLine("touchRouters: ${routers.size}")
+            routers.forEachIndexed { index, router ->
+                appendLine("  #$index ${router.dumpState()}")
+            }
+        }
+
+        /** 丢弃已经脱离窗口的路由，避免长时间运行后堆积并重复转发 */
+        private fun pruneStaleRoutersLocked() {
+            val iterator = activeRouters.iterator()
+            while (iterator.hasNext()) {
+                val router = iterator.next()
+                val detached = !router.rootView.isAttachedToWindow ||
+                        router.targetProvider()?.isAttachedToWindow == false
+                if (detached) {
+                    YLog.info(TAG, "Prune stale router: ${router.rootView.javaClass.simpleName}")
+                    iterator.remove()
+                    router.attached = false
+                }
+            }
+        }
     }
+
+    /** 当前生效的观察通道 */
+    private enum class Channel { NONE, HOOK, LISTENER, BOTH }
+
+    private var channel: Channel = Channel.NONE
+
+    /** 我们安装的根视图监听包装（自检时用于判断是否被 SystemUI 顶掉） */
+    private var wrapperListener: View.OnTouchListener? = null
+
+    /** 最近一次观察到事件的时间（uptimeMillis） */
+    private var lastEventAt: Long = 0
+
+    /** 最近一次处理过的事件指纹（双通道会对同一事件各回调一次，需要去重） */
+    private var lastEventKey: Long = Long.MIN_VALUE
+
+    /** 通道自检任务 */
+    private var healthCheckTask: Runnable? = null
 
     private val density = rootView.resources.displayMetrics.density
     private val slopPx = SLOP_DP * density
@@ -105,17 +167,38 @@ class LyricTouchRouter(
     /** 是否已挂载(避免同一路由重复注册) */
     private var attached = false
 
-    /** 挂载观察通道(Hook 优先,失败则退化为根视图监听器) */
+    /**
+     * 挂载观察通道
+     *
+     * 同时挂两条互为备份的通道：Hook 根视图的 dispatchTouchEvent + 根视图
+     * OnTouchListener。SystemUI 在运行期可能重新设置根视图的监听器（状态栏重新注入、
+     * 展开通知栏等），单通道一旦被顶掉就再也收不到事件，只能重启框架恢复。
+     * 两条通道会观察到同一个事件，靠 [lastEventKey] 去重。
+     */
     fun attach() {
         if (attached) return
         attached = true
-        synchronized(hookLock) { activeRouters.add(this) }
-
-        if (tryHookDispatchTouchEvent()) {
-            YLog.info(TAG, "Attached via hook: root=${rootView.javaClass.name}")
-        } else {
-            installRootTouchListener()
+        synchronized(hookLock) {
+            pruneStaleRoutersLocked()
+            activeRouters.add(this)
         }
+
+        val hooked = tryHookDispatchTouchEvent()
+        val listenerInstalled = installRootTouchListener()
+        channel = when {
+            hooked && listenerInstalled -> Channel.BOTH
+            hooked -> Channel.HOOK
+            listenerInstalled -> Channel.LISTENER
+            else -> Channel.NONE
+        }
+
+        if (channel == Channel.NONE) {
+            YLog.error(TAG, "No touch channel available! root=${rootView.javaClass.name}")
+        } else {
+            YLog.info(TAG, "Attached: root=${rootView.javaClass.name}, channel=$channel")
+        }
+
+        scheduleHealthCheck()
     }
 
     /** 卸载(恢复根视图原有监听器;Hook 随进程生命周期,不主动解除) */
@@ -123,8 +206,92 @@ class LyricTouchRouter(
         attached = false
         delivering = false
         synchronized(hookLock) { activeRouters.remove(this) }
+        healthCheckTask?.let { rootView.removeCallbacks(it) }
+        healthCheckTask = null
+        wrapperListener = null
         runCatching { rootView.setOnTouchListener(originalTouchListener) }
         originalTouchListener = null
+    }
+
+    /**
+     * 确认通道仍然可用，不可用则重新挂载
+     *
+     * 播放恢复、亮屏、自检都会调用：长时间暂停后触摸失效的常见原因是根视图的
+     * 监听器被 SystemUI 覆盖，这里把通道补回来。
+     */
+    private fun ensureChannelAlive(reason: String) {
+        if (!attached) return
+        if (!rootView.isAttachedToWindow) return
+
+        val healthy = ensureListenerInstalled()
+        if (!healthy && channel == Channel.NONE) {
+            // 之前两条通道都没挂上，重试一次 Hook
+            if (tryHookDispatchTouchEvent()) channel = Channel.HOOK
+        }
+        YLog.debug(TAG, "ensureChannelAlive($reason): channel=$channel, listener=$healthy")
+    }
+
+    /**
+     * 确保根视图上的监听包装仍然在位，被覆盖则重新包装
+     *
+     * @return 监听通道是否可用
+     */
+    private fun ensureListenerInstalled(): Boolean {
+        val current = runCatching { readTouchListener(rootView) }.getOrElse {
+            YLog.error(TAG, "Cannot read root touch listener", it)
+            return false
+        }
+
+        if (current === wrapperListener) return true
+
+        val wrapper = View.OnTouchListener { v, ev ->
+            val handled = current?.onTouch(v, ev) ?: false
+            observe(ev)
+            handled
+        }
+        originalTouchListener = current
+        wrapperListener = wrapper
+        rootView.setOnTouchListener(wrapper)
+
+        if (current != null) {
+            YLog.info(
+                TAG,
+                "Root touch listener replaced by ${current.javaClass.name}, re-wrapped"
+            )
+        }
+        channel = if (channel == Channel.HOOK) Channel.BOTH else Channel.LISTENER
+        return true
+    }
+
+    /** 周期自检：监听通道被顶掉时自动补挂 */
+    private fun scheduleHealthCheck() {
+        val task = object : Runnable {
+            override fun run() {
+                if (!attached) return
+                runCatching { ensureChannelAlive("health-check") }
+                    .onFailure { YLog.error(TAG, "Health check failed", it) }
+                rootView.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
+            }
+        }
+        healthCheckTask = task
+        rootView.postDelayed(task, HEALTH_CHECK_INTERVAL_MS)
+    }
+
+    /** 输出本路由的状态，供「导出日志」诊断 */
+    fun dumpState(): String = buildString {
+        append("channel=$channel, attached=$attached, delivering=$delivering")
+        append(", rootAttached=${rootView.isAttachedToWindow}")
+        append(", eventAgo=${SystemClock.uptimeMillis() - lastEventAt}ms")
+        append(", baseline=$baseline")
+        val target = runCatching { targetProvider() }.getOrNull()
+        if (target == null) {
+            append(", target=null")
+        } else {
+            append(
+                ", target[attached=${target.isAttachedToWindow}, visible=${target.isVisible}, " +
+                        "size=${target.width}x${target.height}, native=${target.nativeTouchCount}]"
+            )
+        }
     }
 
     // --- 事件观察与转发 ---
@@ -138,6 +305,24 @@ class LyricTouchRouter(
      * 保证下拉通知栏不受影响。
      */
     private fun observe(ev: MotionEvent) {
+        // 双通道会对同一个事件各回调一次(Hook 在派发后、监听器在派发中),这里去重
+        val eventKey = ev.eventTime * 16 + ev.actionMasked
+        if (eventKey == lastEventKey && ev.actionMasked != MotionEvent.ACTION_MOVE) {
+            return
+        }
+        lastEventKey = eventKey
+
+        val now = SystemClock.uptimeMillis()
+
+        // 上一次手势没收到 UP/CANCEL(通知栏展开会接管触摸流):先复位,避免状态错乱
+        if (delivering &&
+            (ev.actionMasked == MotionEvent.ACTION_DOWN || now - lastEventAt > STALE_GESTURE_MS)
+        ) {
+            YLog.info(TAG, "Reset stuck delivering state (stale=${now - lastEventAt}ms)")
+            cancelDelivering(targetProvider())
+        }
+        lastEventAt = now
+
         val target = targetProvider()
 
         if (target == null || !isTargetActive(target)) {
@@ -346,20 +531,15 @@ class LyricTouchRouter(
      * 且始终返回原监听器的结果,不改变 SystemUI 的触摸行为。
      * 若无法读取原有监听器则放弃挂载,避免覆盖系统监听器。
      */
-    private fun installRootTouchListener() {
-        val existing = runCatching { readTouchListener(rootView) }.getOrElse {
-            YLog.error(TAG, "Cannot read existing touch listener, skip root listener", it)
-            return
+    private fun installRootTouchListener(): Boolean {
+        val installed = runCatching { ensureListenerInstalled() }.getOrElse {
+            YLog.error(TAG, "Cannot install root touch listener", it)
+            false
         }
-
-        originalTouchListener = existing
-        rootView.setOnTouchListener { v, ev ->
-            val handled = existing?.onTouch(v, ev) ?: false
-            observe(ev)
-            handled
+        if (installed) {
+            YLog.info(TAG, "Root touch listener installed: root=${rootView.javaClass.name}")
         }
-
-        YLog.info(TAG, "Attached via root touch listener: root=${rootView.javaClass.name}")
+        return installed
     }
 
     /** 反射读取视图上已注册的 OnTouchListener(用于链式保留) */

@@ -15,6 +15,7 @@ import io.github.proify.lyricon.statusbarlyric.StatusBarLyric
 import io.github.proify.lyricon.statusbarlyric.logo.CoverStrategy
 import io.github.proify.lyricon.subscriber.ActivePlayerListener
 import io.github.proify.lyricon.subscriber.ProviderInfo
+import io.github.proify.lyricon.common.util.ScreenStateMonitor
 import io.github.proify.lyricon.xposed.logger.YLog
 import io.github.proify.lyricon.xposed.systemui.hook.OplusCapsuleHooker
 import io.github.proify.lyricon.xposed.systemui.lyric.StatusBarViewManager.MAIN_LOOPER
@@ -116,10 +117,16 @@ object LyricViewController : ActivePlayerListener,
      */
     private val frameUpdater = Runnable {
         val controllers = StatusBarViewManager.controllers
+        val awake = !isScreenOff()
         for (i in controllers.indices) {
+            if (awake) controllers[i].lyricView.ensureAwake()
             controllers[i].lyricView.setPosition(currentLogicPosition)
         }
     }
+
+    /** 屏幕是否处于灭屏状态（灭屏时不应把歌词视图从休眠态唤醒） */
+    private fun isScreenOff(): Boolean =
+        ScreenStateMonitor.state == ScreenStateMonitor.ScreenState.OFF
 
     init {
         if (DEBUG) YLog.debug(TAG, "Initializing LyricViewController...")
@@ -230,8 +237,15 @@ object LyricViewController : ActivePlayerListener,
         // 停止播放视为一轮播放结束，重置用户手动隐藏状态，避免歌词一直不再显示
         if (!isPlaying) setLyricHiddenByUser(false)
 
+        if (isPlaying && !isScreenOff()) {
+            // 长时间暂停后触摸失效的常见原因：根视图的触摸监听被 SystemUI 覆盖，
+            // 或视图卡在休眠态。恢复播放时顺手把通道与休眠状态校正回来。
+            LyricTouchRouter.refreshAllChannels("playback-resume")
+        }
+
         var anyRendered = false
         updateAllControllers {
+            if (isPlaying && !isScreenOff()) lyricView.ensureAwake()
             lyricView.setPlaying(isPlaying)
             // 恢复播放时兜底：暂停期间歌词行被清空，只重建数据不会重新定位，
             // 若进度推送迟到（长时间暂停后上游可能已停止推送），歌词会一直不显示。

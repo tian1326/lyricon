@@ -455,6 +455,8 @@ class StatusBarViewController(
     override fun onScreenOn() {
         lyricView.updateVisibility()
         lyricView.isSleepMode = false
+        // 灭屏/亮屏会让 SystemUI 重建状态栏的部分视图与监听器，触摸通道可能失效
+        LyricTouchRouter.refreshAllChannels("screen-on")
     }
 
     override fun onScreenOff() {
@@ -465,6 +467,7 @@ class StatusBarViewController(
     override fun onScreenUnlocked() {
         lyricView.updateVisibility()
         lyricView.isSleepMode = false
+        LyricTouchRouter.refreshAllChannels("screen-unlocked")
     }
 
     fun onDisableStateChanged(shouldHide: Boolean) {

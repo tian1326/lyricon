@@ -31,6 +31,7 @@ import io.github.proify.lyricon.xposed.systemui.hook.StatusBarViewResolver
 import io.github.proify.lyricon.xposed.systemui.hook.ViewVisibilityTracker
 import io.github.proify.lyricon.xposed.systemui.lyric.LyricDataHub
 import io.github.proify.lyricon.xposed.systemui.lyric.LyricPrefs
+import io.github.proify.lyricon.xposed.systemui.lyric.LyricTouchRouter
 import io.github.proify.lyricon.xposed.systemui.lyric.LyricViewController
 import io.github.proify.lyricon.xposed.systemui.lyric.StatusBarViewController
 import io.github.proify.lyricon.xposed.systemui.lyric.StatusBarViewManager
@@ -278,6 +279,9 @@ object SystemUIHooker : PackageHooker() {
                 )
                 appendLine("     ${controller.lyricView.dumpState()}")
             }
+
+            // 触摸链路状态：用于排查"歌词显示但点击没反应"
+            append(LyricTouchRouter.dumpDiagnostics())
         }
     }
 

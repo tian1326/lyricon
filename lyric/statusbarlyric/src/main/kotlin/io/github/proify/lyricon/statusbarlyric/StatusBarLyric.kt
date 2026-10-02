@@ -212,6 +212,17 @@ class StatusBarLyric(
             }
         }
 
+    /**
+     * 退出休眠模式（幂等）
+     *
+     * 灭屏广播丢失（或视图在灭屏期间才创建）时，视图会一直停留在休眠态：
+     * 进度全部被吞进 [pendingSleepData]，歌词永远渲染不出来，
+     * 也就没有任何可供点击的目标——表现为"触摸失效"。亮屏/恢复播放时兜底调用。
+     */
+    fun ensureAwake() {
+        if (isSleepMode) isSleepMode = false
+    }
+
     // --- 样式 / 播放状态 ---
 
     private var currentStyle: LyricStyle = initialStyle
