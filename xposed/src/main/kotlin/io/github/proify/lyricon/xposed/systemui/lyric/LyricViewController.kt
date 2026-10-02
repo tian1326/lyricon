@@ -235,7 +235,11 @@ object LyricViewController : ActivePlayerListener,
         this.isPlaying = isPlaying
 
         // 停止播放视为一轮播放结束，重置用户手动隐藏状态，避免歌词一直不再显示
-        if (!isPlaying) setLyricHiddenByUser(false)
+        if (!isPlaying) {
+            setLyricHiddenByUser(false)
+            // 歌词不再可交互，触摸通道自检没有意义，立即停掉避免后台空转
+            LyricTouchRouter.pauseHealthChecks("playback-stopped")
+        }
 
         if (isPlaying && !isScreenOff()) {
             // 长时间暂停后触摸失效的常见原因：根视图的触摸监听被 SystemUI 覆盖，

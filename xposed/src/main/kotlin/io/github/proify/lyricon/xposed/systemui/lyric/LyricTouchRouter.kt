@@ -11,6 +11,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.isVisible
+import io.github.proify.lyricon.common.util.ScreenStateMonitor
 import io.github.proify.lyricon.statusbarlyric.StatusBarLyric
 import io.github.proify.lyricon.xposed.ModuleEntry
 import io.github.proify.lyricon.xposed.logger.YLog
@@ -69,8 +70,13 @@ class LyricTouchRouter(
         /** 保护上面两个集合 */
         private val hookLock = Any()
 
-        /** 通道自检间隔：监听通道可能被 SystemUI 重新设置而丢失，需要定期补挂 */
-        private const val HEALTH_CHECK_INTERVAL_MS = 5_000L
+        /**
+         * 通道自检间隔：监听通道可能被 SystemUI 重新设置而丢失，需要定期补挂。
+         *
+         * 自检只在"歌词正在播放且可交互"时运行（见 [shouldKeepHealthCheck]），
+         * 停止播放/灭屏后会自行停止，不会常驻空转。
+         */
+        private const val HEALTH_CHECK_INTERVAL_MS = 30_000L
 
         /**
          * 判定"上一次手势已经卡死"的间隔
@@ -87,7 +93,19 @@ class LyricTouchRouter(
                 YLog.info(TAG, "refreshAllChannels($reason): no active router")
                 return
             }
-            routers.forEach { runCatching { it.ensureChannelAlive(reason) } }
+            routers.forEach {
+                runCatching {
+                    it.ensureChannelAlive(reason)
+                    // 事件触发校正后，若此刻正需要自检（播放中且歌词可交互）则重新拉起循环
+                    it.scheduleHealthCheck()
+                }
+            }
+        }
+
+        /** 停止播放 / 灭屏时立即停掉自检，避免后台空转 */
+        fun pauseHealthChecks(reason: String) {
+            val routers = synchronized(hookLock) { activeRouters.toList() }
+            routers.forEach { it.stopHealthCheck(reason) }
         }
 
         /** 汇总所有路由的状态，供「导出日志」诊断 */
@@ -131,6 +149,9 @@ class LyricTouchRouter(
 
     /** 通道自检任务 */
     private var healthCheckTask: Runnable? = null
+
+    /** 自检循环是否正在运行 */
+    private var healthCheckScheduled = false
 
     private val density = rootView.resources.displayMetrics.density
     private val slopPx = SLOP_DP * density
@@ -208,6 +229,7 @@ class LyricTouchRouter(
         synchronized(hookLock) { activeRouters.remove(this) }
         healthCheckTask?.let { rootView.removeCallbacks(it) }
         healthCheckTask = null
+        healthCheckScheduled = false
         wrapperListener = null
         runCatching { rootView.setOnTouchListener(originalTouchListener) }
         originalTouchListener = null
@@ -263,11 +285,28 @@ class LyricTouchRouter(
         return true
     }
 
-    /** 周期自检：监听通道被顶掉时自动补挂 */
+    /**
+     * 周期自检：监听通道被顶掉时自动补挂。
+     *
+     * 只在歌词正在播放且可交互时运行；不满足条件就不排任何任务，
+     * 由 [refreshAllChannels]（亮屏 / 恢复播放）在需要时重新拉起。
+     */
     private fun scheduleHealthCheck() {
+        if (!attached || healthCheckScheduled) return
+        if (!shouldKeepHealthCheck()) return
+
+        healthCheckScheduled = true
         val task = object : Runnable {
             override fun run() {
-                if (!attached) return
+                if (!attached) {
+                    healthCheckScheduled = false
+                    return
+                }
+                if (!shouldKeepHealthCheck()) {
+                    healthCheckScheduled = false
+                    YLog.debug(TAG, "Health check paused: lyric not interactive")
+                    return
+                }
                 runCatching { ensureChannelAlive("health-check") }
                     .onFailure { YLog.error(TAG, "Health check failed", it) }
                 rootView.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
@@ -275,6 +314,28 @@ class LyricTouchRouter(
         }
         healthCheckTask = task
         rootView.postDelayed(task, HEALTH_CHECK_INTERVAL_MS)
+    }
+
+    /** 停止自检并移除已排期的任务 */
+    private fun stopHealthCheck(reason: String) {
+        if (!healthCheckScheduled) return
+        healthCheckScheduled = false
+        healthCheckTask?.let { rootView.removeCallbacks(it) }
+        healthCheckTask = null
+        YLog.debug(TAG, "Health check stopped: $reason")
+    }
+
+    /**
+     * 是否值得继续自检
+     *
+     * 只有"正在播放、屏幕亮着、歌词视图可交互"时触摸才有意义，
+     * 其余时间不排任何定时任务，避免后台空转唤醒主线程。
+     */
+    private fun shouldKeepHealthCheck(): Boolean {
+        if (!LyricViewController.isPlaying) return false
+        if (ScreenStateMonitor.state == ScreenStateMonitor.ScreenState.OFF) return false
+        val target = runCatching { targetProvider() }.getOrNull() ?: return false
+        return isTargetActive(target)
     }
 
     /** 输出本路由的状态，供「导出日志」诊断 */

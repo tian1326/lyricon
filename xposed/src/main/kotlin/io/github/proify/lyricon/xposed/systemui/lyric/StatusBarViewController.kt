@@ -462,6 +462,7 @@ class StatusBarViewController(
     override fun onScreenOff() {
         lyricView.updateVisibility()
         lyricView.isSleepMode = true
+        LyricTouchRouter.pauseHealthChecks("screen-off")
     }
 
     override fun onScreenUnlocked() {
