@@ -462,11 +462,15 @@ class StatusBarLyric(
      * 控制层持有全局的播放进度，而视图可能因为状态栏被重新注入等原因丢失过
      * [lastPosition]。若歌词行已经渲染出来就直接跳过，避免无谓的重复定位。
      */
-    fun ensureLyricsRendered(position: Long) {
-        if (position <= 0) return
-        if (textView.shouldShow()) return
+    /**
+     * @return 调用后视图里是否已经有可显示的歌词行
+     */
+    fun ensureLyricsRendered(position: Long): Boolean {
+        if (textView.shouldShow()) return true
+        if (position <= 0) return false
         Log.d(TAG, "ensureLyricsRendered: seek to $position")
         seekTo(position)
+        return textView.shouldShow()
     }
 
     fun isHideOnLockScreen() =
@@ -541,6 +545,7 @@ class StatusBarLyric(
         append(", sleep=$isSleepMode")
         append(", textShouldShow=${textView.shouldShow()}")
         append(", type=$lyricType")
+        append(", hasSong=${lastSong != null}, hasText=${lastText != null}")
         append(", lastPosition=$lastPosition")
         append(", alpha=$alpha")
         append(", size=${width}x${height}")

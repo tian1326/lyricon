@@ -46,6 +46,15 @@ object LyricViewController : ActivePlayerListener,
         private set
 
     /**
+     * 上一次连接过的播放器包名（断开时不清空）
+     *
+     * 用于判断"同播放器断开后重连"：provider 断开时 [activePackage] 会被置空，
+     * 只靠它无法区分"重连"与"换了播放器"。
+     */
+    @Volatile
+    private var lastProviderPackage: String = ""
+
+    /**
      * 用户是否手动隐藏了歌词（点击歌词区域触发）
      *
      * 隐藏时歌词从状态栏移出，被可见性规则隐藏的状态栏组件会恢复显示。
@@ -95,6 +104,12 @@ object LyricViewController : ActivePlayerListener,
 
     /** 进度日志节流间隔：进度每秒都在推，只按这个间隔打一条 */
     private const val POSITION_LOG_INTERVAL_MS = 10_000L
+
+    /** 上次请求上游重发歌词的时间戳 */
+    private var lastResendRequestAt: Long = 0
+
+    /** 请求重发的最小间隔：状态回调非常密集，避免反复触发补发流水线 */
+    private const val RESEND_REQUEST_INTERVAL_MS = 5_000L
 
     /** * 高频进度更新任务。
      * 使用单例 Runnable 减少 GC 压力，仅在进度变更时由主线程调度。
@@ -153,14 +168,52 @@ object LyricViewController : ActivePlayerListener,
     override fun onActiveProviderChanged(providerInfo: ProviderInfo?) {
         YLog.info(TAG, "onActiveProviderChanged: $providerInfo")
 
+        val newPackage = providerInfo?.playerPackageName.orEmpty()
+
+        // 同播放器断开后重连：视图内容在断开时已被清空，但全局缓存还在，
+        // 这里走"补发"而不是"硬清空"，重连后歌词立刻回来
+        val isSameProviderReconnect =
+            providerInfo != null && newPackage.isNotEmpty() && newPackage == lastProviderPackage
+        if (newPackage.isNotEmpty()) lastProviderPackage = newPackage
+
         // 切换播放源属于新一轮播放，重置用户手动隐藏状态
         setLyricHiddenByUser(false)
-        this.activePackage = providerInfo?.playerPackageName.orEmpty()
-        LyricPrefs.activePackageName = this.activePackage
+        this.activePackage = newPackage
+        LyricPrefs.activePackageName = newPackage
 
-        updateAllControllers {
-            resetViewForNewPlayer(this, providerInfo)
+        if (isSameProviderReconnect) {
+            YLog.info(TAG, "Same provider reconnected ($newPackage), restoring cached lyric state")
+            updateAllControllers {
+                restoreStateForSameProvider(this, providerInfo)
+            }
+        } else {
+            updateAllControllers {
+                resetViewForNewPlayer(this, providerInfo)
+            }
         }
+
+        // 断开重连后上游常常只继续推进度、不再重发 onSongChanged，
+        // 这里主动请求补发一次；切换播放器时补发会因包名不匹配自动放弃
+        if (providerInfo != null) {
+            requestLyricResend("provider-changed", newPackage)
+        }
+    }
+
+    /**
+     * 请求上游/本地缓存重新推送当前歌词状态
+     *
+     * @param reason 触发原因，仅用于日志定位
+     * @param expectedPackage 期望的播放器包名，避免把上一个播放器的歌词补发到新播放器
+     */
+    private fun requestLyricResend(reason: String, expectedPackage: String?) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastResendRequestAt < RESEND_REQUEST_INTERVAL_MS) {
+            YLog.debug(TAG, "Skip lyric resend ($reason): throttled")
+            return
+        }
+        lastResendRequestAt = now
+        YLog.info(TAG, "Requesting lyric resend ($reason), package=$expectedPackage")
+        LyricDataHub.requestCurrentSong(expectedPackage)
     }
 
     /**
@@ -177,13 +230,20 @@ object LyricViewController : ActivePlayerListener,
         // 停止播放视为一轮播放结束，重置用户手动隐藏状态，避免歌词一直不再显示
         if (!isPlaying) setLyricHiddenByUser(false)
 
+        var anyRendered = false
         updateAllControllers {
             lyricView.setPlaying(isPlaying)
             // 恢复播放时兜底：暂停期间歌词行被清空，只重建数据不会重新定位，
             // 若进度推送迟到（长时间暂停后上游可能已停止推送），歌词会一直不显示。
-            if (isPlaying) {
-                lyricView.ensureLyricsRendered(currentLogicPosition)
+            if (isPlaying && lyricView.ensureLyricsRendered(currentLogicPosition)) {
+                anyRendered = true
             }
+        }
+
+        // 极端兜底：恢复播放后依然没有任何可显示的行，且全局也没有歌曲数据
+        // （provider 断开重连、数据被清空的场景），主动请求补发一次
+        if (isPlaying && !anyRendered && currentSong == null) {
+            requestLyricResend("resume-without-content", activePackage.ifBlank { null })
         }
     }
 
@@ -223,30 +283,58 @@ object LyricViewController : ActivePlayerListener,
     fun syncTo(controller: StatusBarViewController) {
         StatusBarViewManager.runOnMainThread {
             runCatching {
-                controller.onDisableStateChanged(isStatusBarContentDisabled)
-
-                val song = currentSong
-                val text = currentText
-                if (song != null) {
-                    controller.lyricView.setSong(song)
-                } else if (text != null) {
-                    controller.lyricView.setText(text)
-                }
-                refreshTranslationVisibility(controller.lyricView)
-
-                controller.lyricView.setPlaying(isPlaying)
-                controller.lyricView.setPosition(currentLogicPosition)
-                controller.setLyricUserHidden(isLyricHiddenByUser)
-
-                YLog.info(
-                    TAG,
-                    "Synced state to new controller: playing=$isPlaying, " +
-                            "hidden=$isLyricHiddenByUser, disabled=$isStatusBarContentDisabled"
-                )
+                pushStateTo(controller)
             }.onFailure { e ->
                 YLog.error(TAG, "Failed to sync state to controller", e)
             }
         }
+    }
+
+    /**
+     * 把当前全局状态整体灌进单个控制器（必须在主线程调用）
+     *
+     * [syncTo] 用于新注入的状态栏视图，同播放器重连时复用同一套补发逻辑。
+     */
+    private fun pushStateTo(controller: StatusBarViewController) {
+        controller.onDisableStateChanged(isStatusBarContentDisabled)
+
+        val song = currentSong
+        val text = currentText
+        if (song != null) {
+            controller.lyricView.setSong(song)
+        } else if (text != null) {
+            controller.lyricView.setText(text)
+        }
+        refreshTranslationVisibility(controller.lyricView)
+
+        controller.lyricView.setPlaying(isPlaying)
+        controller.lyricView.setPosition(currentLogicPosition)
+        // 只装载数据不会渲染出歌词行，这里按进度兜底定位一次
+        controller.lyricView.ensureLyricsRendered(currentLogicPosition)
+        controller.setLyricUserHidden(isLyricHiddenByUser)
+
+        YLog.info(
+            TAG,
+            "Synced state to controller: playing=$isPlaying, song=${song?.name}, " +
+                    "position=$currentLogicPosition, hidden=$isLyricHiddenByUser, " +
+                    "disabled=$isStatusBarContentDisabled, " +
+                    "state=${controller.lyricView.dumpState()}"
+        )
+    }
+
+    /**
+     * 同播放器断开重连：用全局缓存把歌词灌回视图，不做硬清空
+     *
+     * 断开时 [resetViewForNewPlayer] 已经执行过 setSong(null)，视图里什么都不剩；
+     * 而重连后上游往往只继续推进度、不再重发 onSongChanged，硬清空就等于一直空白。
+     */
+    private fun restoreStateForSameProvider(
+        controller: StatusBarViewController,
+        provider: ProviderInfo?
+    ) {
+        controller.updateLyricStyle(LyricPrefs.getLyricStyle())
+        applyProviderLogo(controller, provider)
+        pushStateTo(controller)
     }
 
     /**
@@ -339,19 +427,13 @@ object LyricViewController : ActivePlayerListener,
         controller.updateLyricStyle(LyricPrefs.getLyricStyle())
         view.updateVisibility()
 
-        view.logoView.apply {
-            val pkg = provider?.playerPackageName.orEmpty()
-            this.activePackage = pkg
-//
-//            val cover =
-//                if (pkg.isBlank()) {
-//                    null
-//                } else {
-//                    NotificationCoverHelper.getLatestCoverFile(pkg)
-//                }
-//            this.coverFile = cover
-//            controller.updateCoverThemeColors(cover)
+        applyProviderLogo(controller, provider)
+    }
 
+    /** 把播放器信息同步到歌词视图的 logo 区域 */
+    private fun applyProviderLogo(controller: StatusBarViewController, provider: ProviderInfo?) {
+        controller.lyricView.logoView.apply {
+            this.activePackage = provider?.playerPackageName.orEmpty()
             this.providerLogo = provider?.logo
         }
     }
